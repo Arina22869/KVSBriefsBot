@@ -1,0 +1,216 @@
+import logging
+import sqlite3
+from contextlib import contextmanager
+from aiogram import Bot, Dispatcher
+from aiogram.filters import Command
+from aiogram.types import Message
+import asyncio
+
+# ============= НАСТРОЙКИ =============
+TOKEN = "8797047074:AAEHlaYsh26Jf-GsA4G54C-46AcSHTP_uMw"
+ADMIN_IDS = [1665864236]
+# =====================================
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+# ============= БАЗА ДАННЫХ =============
+@contextmanager
+def get_db():
+    conn = sqlite3.connect('briefs.db')
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+def init_db():
+    with get_db() as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS briefs (
+                company TEXT PRIMARY KEY,
+                chat_id INTEGER,
+                status TEXT,
+                deadline TEXT,
+                contact TEXT
+            )
+        ''')
+        conn.commit()
+
+def get_brief_by_chat_id(chat_id):
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT company, status, deadline, contact FROM briefs WHERE chat_id=?",
+            (chat_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                "company": row[0],
+                "status": row[1],
+                "deadline": row[2],
+                "contact": row[3]
+            }
+        return None
+
+def add_brief(company, deadline, contact):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO briefs (company, status, deadline, contact) VALUES (?, ?, ?, ?)",
+            (company, "В работе", deadline, contact)
+        )
+        conn.commit()
+
+def update_brief_status(company, new_status):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE briefs SET status=? WHERE company=?",
+            (new_status, company)
+        )
+        conn.commit()
+
+def link_chat_to_brief(company, chat_id):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE briefs SET chat_id=? WHERE company=?",
+            (chat_id, company)
+        )
+        conn.commit()
+
+def get_all_briefs():
+    with get_db() as conn:
+        cursor = conn.execute("SELECT company, status, deadline, contact, chat_id FROM briefs")
+        return cursor.fetchall()
+
+# ============= КОМАНДЫ ЗАКАЗЧИКА =============
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        f"👋 Привет, {message.from_user.full_name}!\n\n"
+        "🤖 Я бот для отслеживания статуса твоего брифа.\n"
+        "📌 Если ты уже оставлял заявку — отправь /status\n"
+        "📌 Если ты активист — используй /add, /list, /set_status, /delete"
+    )
+
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    chat_id = message.from_user.id
+    brief = get_brief_by_chat_id(chat_id)
+    
+    if brief:
+        text = (
+            f"👤 Компания: {brief['company']}\n"
+            f"📊 Статус: {brief['status']}\n"
+            f"📅 Дедлайн: {brief['deadline']}\n"
+            f"📞 Контакт: {brief['contact']}"
+        )
+    else:
+        text = "❌ У тебя пока нет активных брифов."
+    
+    await message.answer(text)
+
+# ============= КОМАНДЫ АКТИВИСТА =============
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+@dp.message(Command("add"))
+async def cmd_add(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    args = message.text.split(maxsplit=3)
+    if len(args) < 4:
+        await message.answer("📝 Формат: /add Название_компании Дедлайн Контакт\nПример: /add ООО Пример 25.04.2024 @ivanov")
+        return
+    
+    company = args[1]
+    deadline = args[2]
+    contact = args[3]
+    
+    try:
+        add_brief(company, deadline, contact)
+        await message.answer(f"✅ Бриф для {company} добавлен! Статус: В работе")
+    except sqlite3.IntegrityError:
+        await message.answer(f"❌ Бриф для {company} уже существует")
+
+@dp.message(Command("set_status"))
+async def cmd_set_status(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("📝 Формат: /set_status Название_компании Новый статус")
+        return
+    
+    company = args[1]
+    new_status = args[2]
+    
+    update_brief_status(company, new_status)
+    await message.answer(f"✅ Статус для {company} обновлён: {new_status}")
+
+@dp.message(Command("list"))
+async def cmd_list(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    briefs = get_all_briefs()
+    if not briefs:
+        await message.answer("📭 Пока нет ни одного брифа.")
+        return
+    
+    text = "📋 Все брифы:\n\n"
+    for company, status, deadline, contact, chat_id in briefs:
+        linked = "✅" if chat_id and chat_id != 0 else "❌"
+        text += f"• {company} {linked}\n  📊 {status}\n  📅 {deadline}\n  📞 {contact}\n\n"
+    
+    await message.answer(text)
+
+@dp.message(Command("link"))
+async def cmd_link(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("📝 Формат: /link Название_компании chat_id")
+        return
+    
+    company = args[1]
+    try:
+        chat_id = int(args[2])
+        link_chat_to_brief(company, chat_id)
+        await message.answer(f"✅ Заказчик привязан к брифу {company}")
+    except ValueError:
+        await message.answer("❌ chat_id должен быть числом")
+
+@dp.message(Command("delete"))
+async def cmd_delete(message: Message):
+    """Удалить бриф (только для админов)"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("📝 Формат: /delete Название_компании\nПример: /delete ООО Пример")
+        return
+    
+    company = args[1]
+    
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM briefs WHERE company=?", (company,))
+        conn.commit()
+        if cursor.rowcount > 0:
+            await message.answer(f"✅ Бриф для {company} удалён")
+        else:
+            await message.answer(f"❌ Бриф с названием {company} не найден")
+
+# ============= ЗАПУСК =============
+async def main():
+    init_db()
+    print("🚀 Бот запущен! Нажми Ctrl+C для остановки.")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
