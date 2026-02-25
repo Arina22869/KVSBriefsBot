@@ -3,12 +3,13 @@ import sqlite3
 from contextlib import contextmanager
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
 import asyncio
 
 # ============= НАСТРОЙКИ =============
 TOKEN = "8797047074:AAEHlaYsh26Jf-GsA4G54C-46AcSHTP_uMw"
-OWNER_ID = 1665864236  # Твой ID — всегда админ
+OWNER_ID = 1665864236
 # =====================================
 
 logging.basicConfig(level=logging.INFO)
@@ -27,7 +28,6 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Таблица брифов
         conn.execute('''
             CREATE TABLE IF NOT EXISTS briefs (
                 company TEXT PRIMARY KEY,
@@ -37,18 +37,15 @@ def init_db():
                 contact TEXT
             )
         ''')
-        # Таблица админов
         conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id INTEGER PRIMARY KEY
             )
         ''')
-        # Добавляем владельца, если его нет
         conn.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (OWNER_ID,))
         conn.commit()
 
 def is_admin(user_id):
-    """Проверка, является ли пользователь админом"""
     if user_id == OWNER_ID:
         return True
     with get_db() as conn:
@@ -56,27 +53,23 @@ def is_admin(user_id):
         return cursor.fetchone() is not None
 
 def add_admin(user_id):
-    """Добавить админа"""
     with get_db() as conn:
         conn.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (user_id,))
         conn.commit()
 
 def remove_admin(user_id):
-    """Удалить админа"""
     if user_id == OWNER_ID:
-        return False  # Владельца нельзя удалить
+        return False
     with get_db() as conn:
         conn.execute('DELETE FROM admins WHERE user_id = ?', (user_id,))
         conn.commit()
         return True
 
 def get_all_admins():
-    """Получить список всех админов"""
     with get_db() as conn:
         cursor = conn.execute('SELECT user_id FROM admins ORDER BY user_id')
         return [row[0] for row in cursor.fetchall()]
 
-# ============= ФУНКЦИИ ДЛЯ БРИФОВ (без изменений) =============
 def get_brief_by_chat_id(chat_id):
     with get_db() as conn:
         cursor = conn.execute(
@@ -128,14 +121,31 @@ def delete_brief(company):
         conn.commit()
         return cursor.rowcount > 0
 
+# ============= КЛАВИАТУРА =============
+def get_activists_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text="🔧 Команды активиста"))
+    builder.add(KeyboardButton(text="📋 Список брифов"))
+    builder.add(KeyboardButton(text="➕ Добавить бриф"))
+    builder.add(KeyboardButton(text="❌ Удалить бриф"))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
 # ============= КОМАНДЫ ЗАКАЗЧИКА =============
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer(
+    base_text = (
         f"👋 Привет, {message.from_user.full_name}!\n\n"
-        "🤖 Я бот для отслеживания статуса твоего брифа.\n"
-        "📌 Если ты уже оставлял заявку — отправь /status"
+        "Я бот для отслеживания статуса твоего брифа.\n"
+        "Если ты уже оставлял заявку — отправь /status"
     )
+    
+    if is_admin(message.from_user.id):
+        base_text += (
+            "\n\n🔧 Ты активист! Нажми /menu, чтобы открыть панель управления."
+        )
+    
+    await message.answer(base_text)
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
@@ -154,7 +164,64 @@ async def cmd_status(message: Message):
     
     await message.answer(text)
 
-# ============= КОМАНДЫ АДМИНОВ (УПРАВЛЕНИЕ БРИФАМИ) =============
+# ============= МЕНЮ АКТИВИСТА =============
+@dp.message(Command("menu"))
+async def cmd_menu(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    await message.answer(
+        "🔧 Меню активиста:",
+        reply_markup=get_activists_keyboard()
+    )
+
+@dp.message(lambda message: message.text == "🔧 Команды активиста")
+async def show_commands(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    text = (
+        "🔧 Команды активиста:\n\n"
+        "📋 Управление брифами:\n"
+        "/add Название Дедлайн Контакт – добавить бриф\n"
+        "/set_status Название Новый статус – изменить статус\n"
+        "/list – показать все брифы\n"
+        "/delete Название – удалить бриф\n"
+        "/link Название chat_id – привязать заказчика\n\n"
+        "👑 Управление админами:\n"
+        "/addadmin TelegramID – добавить админа\n"
+        "/removeadmin TelegramID – удалить админа\n"
+        "/listadmins – список админов"
+    )
+    await message.answer(text)
+
+@dp.message(lambda message: message.text == "📋 Список брифов")
+async def button_list(message: Message):
+    await cmd_list(message)
+
+@dp.message(lambda message: message.text == "➕ Добавить бриф")
+async def button_add_prompt(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "➕ Чтобы добавить бриф, напиши:\n"
+        "/add Название_компании Дедлайн Контакт\n\n"
+        "Пример:\n"
+        "/add ООО Пример 25.04.2024 @manager"
+    )
+
+@dp.message(lambda message: message.text == "❌ Удалить бриф")
+async def button_delete_prompt(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "❌ Чтобы удалить бриф, напиши:\n"
+        "/delete Название_компании\n\n"
+        "Пример:\n"
+        "/delete ООО Пример"
+    )
+
+# ============= КОМАНДЫ АДМИНОВ (БРИФЫ) =============
 @dp.message(Command("add"))
 async def cmd_add(message: Message):
     if not is_admin(message.from_user.id):
@@ -162,7 +229,10 @@ async def cmd_add(message: Message):
     
     args = message.text.split(maxsplit=3)
     if len(args) < 4:
-        await message.answer("📝 Формат: /add Название_компании Дедлайн Контакт\nПример: /add ООО Пример 25.04.2024 @ivanov")
+        await message.answer(
+            "📝 Формат: /add Название_компании Дедлайн Контакт\n"
+            "Пример: /add ООО Пример 25.04.2024 @ivanov"
+        )
         return
     
     company = args[1]
@@ -182,7 +252,10 @@ async def cmd_set_status(message: Message):
     
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.answer("📝 Формат: /set_status Название_компании Новый статус")
+        await message.answer(
+            "📝 Формат: /set_status Название_компании Новый статус\n"
+            "Пример: /set_status ООО Пример На согласовании"
+        )
         return
     
     company = args[1]
@@ -215,7 +288,10 @@ async def cmd_link(message: Message):
     
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.answer("📝 Формат: /link Название_компании chat_id")
+        await message.answer(
+            "📝 Формат: /link Название_компании chat_id\n"
+            "Пример: /link ООО Пример 123456789"
+        )
         return
     
     company = args[1]
@@ -233,7 +309,10 @@ async def cmd_delete(message: Message):
     
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("📝 Формат: /delete Название_компании\nПример: /delete ООО Пример")
+        await message.answer(
+            "📝 Формат: /delete Название_компании\n"
+            "Пример: /delete ООО Пример"
+        )
         return
     
     company = args[1]
@@ -250,7 +329,10 @@ async def cmd_add_admin(message: Message):
     
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("📝 Формат: /addadmin TelegramID\nПример: /addadmin 123456789")
+        await message.answer(
+            "📝 Формат: /addadmin TelegramID\n"
+            "Пример: /addadmin 123456789"
+        )
         return
     
     try:
@@ -267,7 +349,10 @@ async def cmd_remove_admin(message: Message):
     
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("📝 Формат: /removeadmin TelegramID")
+        await message.answer(
+            "📝 Формат: /removeadmin TelegramID\n"
+            "Пример: /removeadmin 123456789"
+        )
         return
     
     try:
@@ -285,7 +370,7 @@ async def cmd_list_admins(message: Message):
         return
     
     admins = get_all_admins()
-    text = "👑 **Список админов:**\n\n"
+    text = "👑 Список админов:\n\n"
     for admin_id in admins:
         if admin_id == OWNER_ID:
             text += f"• {admin_id} (владелец) 👑\n"
