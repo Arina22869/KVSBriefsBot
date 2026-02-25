@@ -8,7 +8,7 @@ import asyncio
 
 # ============= НАСТРОЙКИ =============
 TOKEN = "8797047074:AAEHlaYsh26Jf-GsA4G54C-46AcSHTP_uMw"
-ADMIN_IDS = [1665864236]
+OWNER_ID = 1665864236  # Твой ID — всегда админ
 # =====================================
 
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +27,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
+        # Таблица брифов
         conn.execute('''
             CREATE TABLE IF NOT EXISTS briefs (
                 company TEXT PRIMARY KEY,
@@ -36,8 +37,46 @@ def init_db():
                 contact TEXT
             )
         ''')
+        # Таблица админов
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY
+            )
+        ''')
+        # Добавляем владельца, если его нет
+        conn.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (OWNER_ID,))
         conn.commit()
 
+def is_admin(user_id):
+    """Проверка, является ли пользователь админом"""
+    if user_id == OWNER_ID:
+        return True
+    with get_db() as conn:
+        cursor = conn.execute('SELECT 1 FROM admins WHERE user_id = ?', (user_id,))
+        return cursor.fetchone() is not None
+
+def add_admin(user_id):
+    """Добавить админа"""
+    with get_db() as conn:
+        conn.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+
+def remove_admin(user_id):
+    """Удалить админа"""
+    if user_id == OWNER_ID:
+        return False  # Владельца нельзя удалить
+    with get_db() as conn:
+        conn.execute('DELETE FROM admins WHERE user_id = ?', (user_id,))
+        conn.commit()
+        return True
+
+def get_all_admins():
+    """Получить список всех админов"""
+    with get_db() as conn:
+        cursor = conn.execute('SELECT user_id FROM admins ORDER BY user_id')
+        return [row[0] for row in cursor.fetchall()]
+
+# ============= ФУНКЦИИ ДЛЯ БРИФОВ (без изменений) =============
 def get_brief_by_chat_id(chat_id):
     with get_db() as conn:
         cursor = conn.execute(
@@ -83,14 +122,19 @@ def get_all_briefs():
         cursor = conn.execute("SELECT company, status, deadline, contact, chat_id FROM briefs")
         return cursor.fetchall()
 
+def delete_brief(company):
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM briefs WHERE company=?", (company,))
+        conn.commit()
+        return cursor.rowcount > 0
+
 # ============= КОМАНДЫ ЗАКАЗЧИКА =============
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
         f"👋 Привет, {message.from_user.full_name}!\n\n"
         "🤖 Я бот для отслеживания статуса твоего брифа.\n"
-        "📌 Если ты уже оставлял заявку — отправь /status\n"
-        "📌 Если ты активист — используй /add, /list, /set_status, /delete"
+        "📌 Если ты уже оставлял заявку — отправь /status"
     )
 
 @dp.message(Command("status"))
@@ -110,10 +154,7 @@ async def cmd_status(message: Message):
     
     await message.answer(text)
 
-# ============= КОМАНДЫ АКТИВИСТА =============
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
+# ============= КОМАНДЫ АДМИНОВ (УПРАВЛЕНИЕ БРИФАМИ) =============
 @dp.message(Command("add"))
 async def cmd_add(message: Message):
     if not is_admin(message.from_user.id):
@@ -187,7 +228,6 @@ async def cmd_link(message: Message):
 
 @dp.message(Command("delete"))
 async def cmd_delete(message: Message):
-    """Удалить бриф (только для админов)"""
     if not is_admin(message.from_user.id):
         return
     
@@ -197,14 +237,62 @@ async def cmd_delete(message: Message):
         return
     
     company = args[1]
+    if delete_brief(company):
+        await message.answer(f"✅ Бриф для {company} удалён")
+    else:
+        await message.answer(f"❌ Бриф с названием {company} не найден")
+
+# ============= КОМАНДЫ УПРАВЛЕНИЯ АДМИНАМИ =============
+@dp.message(Command("addadmin"))
+async def cmd_add_admin(message: Message):
+    if not is_admin(message.from_user.id):
+        return
     
-    with get_db() as conn:
-        cursor = conn.execute("DELETE FROM briefs WHERE company=?", (company,))
-        conn.commit()
-        if cursor.rowcount > 0:
-            await message.answer(f"✅ Бриф для {company} удалён")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("📝 Формат: /addadmin TelegramID\nПример: /addadmin 123456789")
+        return
+    
+    try:
+        new_admin_id = int(args[1])
+        add_admin(new_admin_id)
+        await message.answer(f"✅ Пользователь {new_admin_id} добавлен в админы")
+    except ValueError:
+        await message.answer("❌ ID должен быть числом")
+
+@dp.message(Command("removeadmin"))
+async def cmd_remove_admin(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("📝 Формат: /removeadmin TelegramID")
+        return
+    
+    try:
+        admin_id = int(args[1])
+        if remove_admin(admin_id):
+            await message.answer(f"✅ Пользователь {admin_id} удалён из админов")
         else:
-            await message.answer(f"❌ Бриф с названием {company} не найден")
+            await message.answer("❌ Владельца нельзя удалить или пользователь не найден")
+    except ValueError:
+        await message.answer("❌ ID должен быть числом")
+
+@dp.message(Command("listadmins"))
+async def cmd_list_admins(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    admins = get_all_admins()
+    text = "👑 **Список админов:**\n\n"
+    for admin_id in admins:
+        if admin_id == OWNER_ID:
+            text += f"• {admin_id} (владелец) 👑\n"
+        else:
+            text += f"• {admin_id}\n"
+    
+    await message.answer(text)
 
 # ============= ЗАПУСК =============
 async def main():
