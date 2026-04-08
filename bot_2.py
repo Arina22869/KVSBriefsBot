@@ -2,20 +2,25 @@ import logging
 import sqlite3
 import csv
 import requests
+import os
 from contextlib import contextmanager
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
 import asyncio
 from io import StringIO
 
 # ============= НАСТРОЙКИ =============
-TOKEN = "8797047074:AAEHlaYsh26Jf-GsA4G54C-46AcSHTP_uMw"
+TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ BOT_TOKEN не найден! Добавьте переменную окружения BOT_TOKEN на сервере")
+
+OWNER_ID = 1665864236
 ADMIN_IDS = [1665864236]
 
 CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSb7eq1Jol47Xa4Bu714QMQl8RNIleLDQ2jhQecLIcrnWIpgLlCxoGQH3dw9EKZhQfMI-czGjnfuM_F/pub?output=csv"
 # =====================================
-
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
